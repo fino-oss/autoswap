@@ -53,8 +53,8 @@ logger = logging.getLogger(__name__)
 # ─── Constants ────────────────────────────────────────────────────────────────
 
 RELAY_LINK_API = "https://api.relay.link"
-GELATO_RELAY_API = "https://relay.gelato.network"
-GELATO_TASK_STATUS_URL = "https://relay.gelato.network/tasks/status"
+GELATO_RELAY_API = "https://api.gelato.digital"          # corrected: relay.gelato.network redirects (307)
+GELATO_TASK_STATUS_URL = "https://api.gelato.digital/tasks/status"  # corrected endpoint
 VAULT_PATH = "/Users/sam/.pi/agent/skills/agent-vault/vault.sh"
 
 # Chain configuration
@@ -78,6 +78,15 @@ CHAINS: Dict[str, Dict] = {
         "native_decimals": 18,
         "native_coingecko_id": "ethereum",
         # ETH native — use zero address convention for Relay.link
+        "native_address": "0x0000000000000000000000000000000000000000",
+    },
+    "base-sepolia": {
+        "chain_id": 84532,
+        "rpc": "https://sepolia.base.org",
+        "name": "Base Sepolia",
+        "native_symbol": "ETH",
+        "native_decimals": 18,
+        "native_coingecko_id": "ethereum",
         "native_address": "0x0000000000000000000000000000000000000000",
     },
     "arbitrum": {
