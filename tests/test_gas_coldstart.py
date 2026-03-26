@@ -477,6 +477,282 @@ def main():
         print(f"  ❌ UNEXPECTED ERROR: {e}")
         errors.append(f"Test 12 (budget): {e}")
 
+    # ══════════════════════════════════════════════════════════════════════════
+    # Phase 2 Tests — Gelato Live Relay (_execute_gelato_relay)
+    # ══════════════════════════════════════════════════════════════════════════
+
+    # ── Test 13: _execute_gelato_relay() — mock live POST to Gelato ──────────
+    print("\n🔵 Test 13 [Phase 2]: _execute_gelato_relay() — mock live POST")
+    print("   (POST relay.gelato.network/relays/v2/sponsored-call → taskId)")
+    try:
+        mock_gelato_resp = MagicMock()
+        mock_gelato_resp.status_code = 200
+        mock_gelato_resp.json.return_value = {
+            "taskId": "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
+        }
+
+        with patch('requests.post', return_value=mock_gelato_resp):
+            task_id = resolver._execute_gelato_relay(
+                chain="polygon",
+                target="0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",  # USDC on Polygon
+                calldata="0xa9059cbb" + "0" * 120,  # transfer(addr, amount) mock
+                gelato_api_key="test-api-key-12345",
+            )
+
+        print(f"\n{'═'*65}")
+        print(f"  taskId: {task_id}")
+        print(f"{'═'*65}")
+
+        assert isinstance(task_id, str), f"taskId must be a string, got {type(task_id)}"
+        assert len(task_id) >= 8, f"taskId must be >= 8 chars, got {len(task_id)}"
+        assert task_id.startswith("0x"), f"taskId should start with 0x, got {task_id[:10]}"
+        print("  ✅ Test 13 PASSED — _execute_gelato_relay() returns valid taskId")
+
+    except AssertionError as e:
+        print(f"  ❌ ASSERTION FAILED: {e}")
+        errors.append(f"Test 13 (gelato relay live): {e}")
+    except Exception as e:
+        print(f"  ❌ UNEXPECTED ERROR: {e}")
+        errors.append(f"Test 13 (gelato relay live): {e}")
+
+    # ── Test 14: _execute_gelato_relay() — 401 invalid API key ───────────────
+    print("\n🔵 Test 14 [Phase 2]: _execute_gelato_relay() — 401 invalid key")
+    try:
+        from gas import GasResolverError as _GasResolverError
+
+        mock_401 = MagicMock()
+        mock_401.status_code = 401
+
+        with patch('requests.post', return_value=mock_401):
+            try:
+                resolver._execute_gelato_relay(
+                    chain="polygon",
+                    target="0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
+                    calldata="0xa9059cbb" + "0" * 120,
+                    gelato_api_key="bad-key",
+                )
+                print("  ❌ FAILED: should have raised GasResolverError")
+                errors.append("Test 14: should raise on 401")
+            except _GasResolverError as e:
+                if "401" in str(e) or "invalid" in str(e).lower() or "GELATO_API_KEY" in str(e):
+                    print(f"  ✅ Test 14 PASSED — 401 correctly raises GasResolverError: {str(e)[:80]}")
+                else:
+                    print(f"  ❌ FAILED: wrong error message: {e}")
+                    errors.append(f"Test 14 (401): wrong message: {e}")
+
+    except Exception as e:
+        print(f"  ❌ UNEXPECTED ERROR: {e}")
+        errors.append(f"Test 14 (gelato 401): {e}")
+
+    # ── Test 15: _execute_gelato_relay() — retry on 429 rate limit ───────────
+    print("\n🔵 Test 15 [Phase 2]: _execute_gelato_relay() — retry on rate limit")
+    try:
+        mock_429 = MagicMock()
+        mock_429.status_code = 429
+        mock_429.text = "rate limited"
+
+        mock_ok = MagicMock()
+        mock_ok.status_code = 200
+        mock_ok.json.return_value = {"taskId": "0xretried1234567890"}
+
+        call_count = {"n": 0}
+        def side_effect(*args, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                return mock_429
+            return mock_ok
+
+        with patch('requests.post', side_effect=side_effect), \
+             patch('time.sleep'):  # Don't actually sleep in tests
+            task_id = resolver._execute_gelato_relay(
+                chain="polygon",
+                target="0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
+                calldata="0xa9059cbb" + "0" * 120,
+                gelato_api_key="test-key",
+                retries=2,
+            )
+
+        assert task_id == "0xretried1234567890", f"expected retried taskId, got {task_id}"
+        assert call_count["n"] == 2, f"expected 2 calls (1 retry), got {call_count['n']}"
+        print(f"  ✅ Test 15 PASSED — retry worked, taskId={task_id}")
+
+    except AssertionError as e:
+        print(f"  ❌ ASSERTION FAILED: {e}")
+        errors.append(f"Test 15 (retry): {e}")
+    except Exception as e:
+        print(f"  ❌ UNEXPECTED ERROR: {e}")
+        errors.append(f"Test 15 (gelato retry): {e}")
+
+    # ── Test 16: check_gelato_task_status() — mock status check ──────────────
+    print("\n🔵 Test 16 [Phase 2]: check_gelato_task_status() — status tracking")
+    try:
+        task_id = "0xabcdef1234567890"
+        mock_status_resp = MagicMock()
+        mock_status_resp.status_code = 200
+        mock_status_resp.json.return_value = {
+            "taskId": task_id,
+            "taskState": "ExecSuccess",
+            "transactionHash": "0x9999888877776666",
+            "blockNumber": 58_000_000,
+            "executionDate": "2026-03-26T12:00:00Z",
+        }
+
+        with patch('requests.get', return_value=mock_status_resp):
+            status = resolver.check_gelato_task_status(task_id)
+
+        print(f"\n{'═'*65}")
+        print(f"  taskState:   {status.get('taskState')}")
+        print(f"  txHash:      {status.get('transactionHash')}")
+        print(f"  blockNumber: {status.get('blockNumber')}")
+        print(f"{'═'*65}")
+
+        assert status.get("taskState") == "ExecSuccess"
+        assert status.get("transactionHash") == "0x9999888877776666"
+        print("  ✅ Test 16 PASSED — check_gelato_task_status() works")
+
+    except AssertionError as e:
+        print(f"  ❌ ASSERTION FAILED: {e}")
+        errors.append(f"Test 16 (task status): {e}")
+    except Exception as e:
+        print(f"  ❌ UNEXPECTED ERROR: {e}")
+        errors.append(f"Test 16 (task status): {e}")
+
+    # ── Test 17: resolve() Gelato path — end-to-end with mock ─────────────────
+    print("\n🔵 Test 17 [Phase 2]: resolve() → Gelato path — end-to-end dry-run")
+    print("   (Relay.link fails → Gelato dry-run → strategy=GELATO_RELAY)")
+    try:
+        with patch.object(resolver, 'check_native_balance', return_value=0.0), \
+             patch('requests.post', side_effect=Exception("Relay.link down")):
+
+            result = resolver.resolve(
+                wallet=TEST_WALLET,
+                chain="polygon",
+                source_chain="base",
+                dry_run=True,
+                gelato_target="0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
+                gelato_calldata="0xa9059cbb" + "0" * 120,
+            )
+
+        print_result("Relay.link down → Gelato dry-run", result)
+
+        assert result.strategy == GasStrategy.GELATO_RELAY, \
+            f"Expected GELATO_RELAY, got {result.strategy}"
+        assert result.dry_run is True
+        assert result.status == "quoted"
+        assert result.gelato_task_id is None  # dry-run: no taskId
+        assert "gelato_relay_endpoint" in result.meta
+        print(f"  ✅ Test 17 PASSED — strategy=GELATO_RELAY, dry-run, no taskId")
+
+    except AssertionError as e:
+        print(f"  ❌ ASSERTION FAILED: {e}")
+        errors.append(f"Test 17 (gelato resolve dry-run): {e}")
+    except Exception as e:
+        print(f"  ❌ UNEXPECTED ERROR: {e}")
+        errors.append(f"Test 17 (gelato resolve): {e}")
+
+    # ── Test 18: resolve() Gelato path — live mode with mock Polygon wallet ──
+    print("\n🔵 Test 18 [Phase 2]: resolve() → Gelato LIVE — mock API key + wallet")
+    print("   (Simulates real Polygon tx relayed gaslessly via Gelato 1Balance)")
+    try:
+        import os
+
+        # Mock Gelato API key in env
+        mock_gelato_post = MagicMock()
+        mock_gelato_post.status_code = 200
+        mock_gelato_post.json.return_value = {
+            "taskId": "0xdeadbeef1234567890abcdef"
+        }
+
+        mock_status = MagicMock()
+        mock_status.status_code = 200
+        mock_status.json.return_value = {
+            "taskState": "ExecPending",
+            "taskId": "0xdeadbeef1234567890abcdef",
+            "transactionHash": None,
+        }
+
+        with patch.object(resolver, 'check_native_balance', return_value=0.0), \
+             patch.object(resolver, '_try_relay_link', return_value=None), \
+             patch.dict(os.environ, {"GELATO_API_KEY": "mock-test-key-phase2"}), \
+             patch('requests.post', return_value=mock_gelato_post), \
+             patch('requests.get', return_value=mock_status), \
+             patch('time.sleep'):  # Don't sleep in tests
+
+            result = resolver.resolve(
+                wallet=TEST_WALLET,
+                chain="polygon",
+                source_chain="base",
+                dry_run=False,   # LIVE mode
+                gelato_target="0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
+                gelato_calldata="0xa9059cbb" + "0" * 120,
+            )
+
+        print_result("Gelato LIVE relay (mock)", result)
+
+        assert result.strategy == GasStrategy.GELATO_RELAY, \
+            f"Expected GELATO_RELAY, got {result.strategy}"
+        assert result.dry_run is False, "dry_run must be False"
+        assert result.gelato_task_id == "0xdeadbeef1234567890abcdef", \
+            f"taskId mismatch: {result.gelato_task_id}"
+        assert result.status in ("submitted", "confirmed"), \
+            f"status must be submitted/confirmed, got {result.status}"
+        assert "gelato_task_id" in result.meta
+        assert "gelato_task_state" in result.meta
+        print(f"  ✅ Test 18 PASSED — LIVE relay | taskId={result.gelato_task_id} | "
+              f"state={result.meta.get('gelato_task_state')}")
+
+    except AssertionError as e:
+        print(f"  ❌ ASSERTION FAILED: {e}")
+        errors.append(f"Test 18 (gelato live resolve): {e}")
+    except Exception as e:
+        print(f"  ❌ UNEXPECTED ERROR: {e}")
+        errors.append(f"Test 18 (gelato live): {e}")
+
+    # ── Test 19: _load_gelato_api_key() — env var priority ───────────────────
+    print("\n🔵 Test 19 [Phase 2]: _load_gelato_api_key() — env var priority")
+    try:
+        import os
+        with patch.dict(os.environ, {"GELATO_API_KEY": "env-key-12345"}):
+            key = resolver._load_gelato_api_key()
+
+        assert key == "env-key-12345", f"Expected env-key-12345, got {key}"
+        print(f"  ✅ Test 19 PASSED — env var key loaded: {key}")
+
+    except AssertionError as e:
+        print(f"  ❌ ASSERTION FAILED: {e}")
+        errors.append(f"Test 19 (key from env): {e}")
+    except Exception as e:
+        print(f"  ❌ UNEXPECTED ERROR: {e}")
+        errors.append(f"Test 19 (load key): {e}")
+
+    # ── Test 20: _execute_gelato_relay() — missing taskId in response ─────────
+    print("\n🔵 Test 20 [Phase 2]: _execute_gelato_relay() — missing taskId in response")
+    try:
+        mock_bad_resp = MagicMock()
+        mock_bad_resp.status_code = 200
+        mock_bad_resp.json.return_value = {"status": "ok"}  # Missing taskId!
+
+        with patch('requests.post', return_value=mock_bad_resp):
+            try:
+                resolver._execute_gelato_relay(
+                    chain="polygon",
+                    target="0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
+                    calldata="0xa9059cbb" + "0" * 120,
+                    gelato_api_key="test-key",
+                )
+                print("  ❌ FAILED: should have raised GasResolverError")
+                errors.append("Test 20: should raise when taskId missing")
+            except GasResolverError as e:
+                if "taskId" in str(e) or "missing" in str(e).lower():
+                    print(f"  ✅ Test 20 PASSED — missing taskId raises correctly: {str(e)[:80]}")
+                else:
+                    print(f"  ❌ Wrong error: {e}")
+                    errors.append(f"Test 20: wrong error: {e}")
+
+    except Exception as e:
+        print(f"  ❌ UNEXPECTED ERROR: {e}")
+        errors.append(f"Test 20 (missing taskId): {e}")
+
     # ── Summary ───────────────────────────────────────────────────────────────
     print(f"\n{'═'*65}")
     if errors:
@@ -486,11 +762,21 @@ def main():
         sys.exit(1)
     else:
         print("✅ All cold start gas tests passed!")
-        print("   Scenario '0 POL + 5 USDC' → RELAY_LINK strategy ✓")
-        print("   Relay.link 'fallback' → Gelato escalation ✓")
-        print("   All strategies fail → MANUAL with clear error ✓")
-        print("   SKIP when gas already available ✓")
-        print("   All 4 chains configured ✓")
+        print("   Phase 1 — Core strategy logic:")
+        print("     Scenario '0 POL + 5 USDC' → RELAY_LINK strategy ✓")
+        print("     Relay.link 'fallback' → Gelato escalation ✓")
+        print("     All strategies fail → MANUAL with clear error ✓")
+        print("     SKIP when gas already available ✓")
+        print("     All 4 chains configured ✓")
+        print("   Phase 2 — Gelato live relay:")
+        print("     _execute_gelato_relay() → taskId ✓")
+        print("     401 invalid key → GasResolverError ✓")
+        print("     429 rate limit → retry with backoff ✓")
+        print("     check_gelato_task_status() tracking ✓")
+        print("     resolve() Gelato dry-run path ✓")
+        print("     resolve() Gelato live mode with mock wallet ✓")
+        print("     _load_gelato_api_key() env var priority ✓")
+        print("     Missing taskId → GasResolverError ✓")
     print(f"{'═'*65}\n")
 
 

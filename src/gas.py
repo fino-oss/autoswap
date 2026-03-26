@@ -54,6 +54,7 @@ logger = logging.getLogger(__name__)
 
 RELAY_LINK_API = "https://api.relay.link"
 GELATO_RELAY_API = "https://relay.gelato.network"
+GELATO_TASK_STATUS_URL = "https://relay.gelato.network/tasks/status"
 VAULT_PATH = "/Users/sam/.pi/agent/skills/agent-vault/vault.sh"
 
 # Chain configuration
@@ -238,17 +239,24 @@ class GasResolver:
         usdc_budget: Optional[float] = None,  # Max USDC to spend (None = auto)
         dry_run: bool = True,
         private_key: Optional[str] = None,
+        # Gelato Phase 2 — optional calldata to relay gaslessly
+        gelato_target: Optional[str] = None,   # Contract to call via Gelato
+        gelato_calldata: Optional[str] = None, # ABI-encoded calldata
+        gelato_gas_limit: Optional[int] = None,
     ) -> GasResolveResult:
         """
         Resolve the cold start gas problem for a given wallet on a chain.
 
         Args:
-            wallet:       Wallet address (0x...)
-            chain:        Target chain that needs gas ("polygon", "base", etc.)
-            source_chain: Chain where USDC is available (default: "base")
-            usdc_budget:  Max USDC to spend on gas acquisition (default: auto ~$2)
-            dry_run:      If True, return quote without executing (default: True)
-            private_key:  Hex private key (overrides vault lookup for live mode)
+            wallet:            Wallet address (0x...)
+            chain:             Target chain that needs gas ("polygon", "base", etc.)
+            source_chain:      Chain where USDC is available (default: "base")
+            usdc_budget:       Max USDC to spend on gas acquisition (default: auto ~$2)
+            dry_run:           If True, return quote without executing (default: True)
+            private_key:       Hex private key (overrides vault lookup for live mode)
+            gelato_target:     [Phase 2] Contract to relay gaslessly via Gelato
+            gelato_calldata:   [Phase 2] ABI-encoded calldata for Gelato relay
+            gelato_gas_limit:  [Phase 2] Optional gas limit for Gelato relay
 
         Returns:
             GasResolveResult with strategy and execution details
@@ -338,6 +346,9 @@ class GasResolver:
             current_balance=current_balance,
             gas_needed=gas_needed,
             dry_run=dry_run,
+            target=gelato_target,
+            calldata=gelato_calldata,
+            gas_limit=gelato_gas_limit,
         )
 
         if gelato_result is not None:
@@ -654,6 +665,230 @@ class GasResolver:
             "setup_required": True,  # Needs Gelato API key + 1Balance deposit
         }
 
+    def _load_gelato_api_key(self) -> Optional[str]:
+        """
+        Load GELATO_API_KEY from environment variable or vault.
+
+        Priority:
+          1. GELATO_API_KEY environment variable
+          2. vault.sh read GELATO_API_KEY
+
+        Returns None if the key is not configured anywhere.
+        To configure:
+            ~/.pi/agent/skills/agent-vault/vault.sh add GELATO_API_KEY "your-key"
+        """
+        import os
+        import subprocess
+
+        # 1. Environment variable (highest priority — CI/CD / docker)
+        key = os.environ.get("GELATO_API_KEY", "").strip()
+        if key:
+            logger.debug("[Gelato] API key loaded from GELATO_API_KEY env var")
+            return key
+
+        # 2. Vault
+        try:
+            result = subprocess.run(
+                [VAULT_PATH, "read", "GELATO_API_KEY"],
+                capture_output=True, text=True, timeout=5,
+            )
+            key = result.stdout.strip()
+            if key and result.returncode == 0:
+                logger.debug("[Gelato] API key loaded from vault")
+                return key
+        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+            logger.debug(f"[Gelato] Vault lookup failed: {e}")
+
+        return None
+
+    def check_gelato_task_status(self, task_id: str) -> Dict[str, Any]:
+        """
+        Check the status of a Gelato relay task.
+
+        GET https://relay.gelato.network/tasks/status/{taskId}
+
+        Response fields:
+            taskState:       "CheckPending" | "ExecPending" | "ExecSuccess" | "ExecReverted" | "Cancelled"
+            transactionHash: "0x..." (once mined)
+            blockNumber:     int
+            creationDate:    ISO timestamp
+            executionDate:   ISO timestamp (once executed)
+            lastCheckMessage: str — last status message from Gelato
+
+        Args:
+            task_id: Gelato task ID returned from _execute_gelato_relay()
+
+        Returns:
+            Dict with taskState and other status fields.
+            Returns {"taskState": "unknown", "error": str} on failure.
+        """
+        url = f"{GELATO_TASK_STATUS_URL}/{task_id}"
+        try:
+            resp = requests.get(url, timeout=self.timeout)
+            if resp.status_code == 200:
+                data = resp.json()
+                logger.info(
+                    f"[Gelato] Task {task_id[:16]}... state: {data.get('taskState', 'unknown')}"
+                )
+                return data
+            else:
+                logger.warning(f"[Gelato] Task status HTTP {resp.status_code}: {resp.text[:100]}")
+                return {"taskState": "unknown", "httpStatus": resp.status_code}
+        except Exception as e:
+            logger.warning(f"[Gelato] Task status check failed: {e}")
+            return {"taskState": "unknown", "error": str(e)}
+
+    def _execute_gelato_relay(
+        self,
+        chain: str,
+        target: str,
+        calldata: str,
+        gelato_api_key: str,
+        gas_limit: Optional[int] = None,
+        retries: int = 2,
+    ) -> str:
+        """
+        Execute a gasless relay call via Gelato's sponsored-call API.
+
+        This is the Phase 2 live implementation of the Gelato fallback.
+        The transaction is sponsored by the Gelato 1Balance account linked
+        to the API key — the user pays no native gas.
+
+        POST https://relay.gelato.network/relays/v2/sponsored-call
+        {
+            "chainId": "137",
+            "target":  "0x...",
+            "data":    "0x...",
+            "sponsorApiKey": "your-api-key",
+            "gasLimit":      "300000"    (optional)
+        }
+
+        Response:
+            {"taskId": "0x1234abcd..."}
+
+        Track status with check_gelato_task_status(taskId).
+
+        Args:
+            chain:          Target chain ("polygon", "base", etc.)
+            target:         Contract address to call (0x...)
+            calldata:       ABI-encoded calldata (0x...)
+            gelato_api_key: Gelato 1Balance API key
+            gas_limit:      Optional gas limit (default: Gelato auto-estimates)
+            retries:        Number of retry attempts on transient failures
+
+        Returns:
+            taskId (str) — Gelato task ID for status tracking
+
+        Raises:
+            GasResolverError: if the relay submission fails after retries
+        """
+        chain_info = CHAINS.get(chain)
+        if not chain_info:
+            raise GasResolverError(f"Unsupported chain for Gelato relay: '{chain}'")
+
+        chain_id = chain_info["chain_id"]
+        endpoint = f"{GELATO_RELAY_API}/relays/v2/sponsored-call"
+
+        payload: Dict[str, Any] = {
+            "chainId":      str(chain_id),
+            "target":       Web3.to_checksum_address(target),
+            "data":         calldata,
+            "sponsorApiKey": gelato_api_key,
+        }
+        if gas_limit is not None:
+            payload["gasLimit"] = str(gas_limit)
+
+        headers = {
+            "Content-Type": "application/json",
+            "Accept":        "application/json",
+        }
+
+        logger.info(
+            f"[Gelato] Submitting sponsored-call relay | "
+            f"chain={chain} (id={chain_id}) | target={target[:16]}..."
+        )
+        logger.debug(f"[Gelato] POST {endpoint} | payload={payload}")
+
+        last_error: Optional[str] = None
+        for attempt in range(1, retries + 1):
+            try:
+                resp = requests.post(
+                    endpoint,
+                    json=payload,
+                    headers=headers,
+                    timeout=self.timeout,
+                )
+            except requests.ConnectionError as e:
+                last_error = f"Connection error: {e}"
+                logger.warning(f"[Gelato] Attempt {attempt}/{retries} — {last_error}")
+                if attempt < retries:
+                    time.sleep(2 ** attempt)
+                continue
+            except requests.Timeout:
+                last_error = f"Timeout after {self.timeout}s"
+                logger.warning(f"[Gelato] Attempt {attempt}/{retries} — {last_error}")
+                if attempt < retries:
+                    time.sleep(2 ** attempt)
+                continue
+
+            # ── Handle HTTP errors ───────────────────────────────────────────
+            if resp.status_code == 401:
+                raise GasResolverError(
+                    "Gelato relay returned HTTP 401 — invalid or expired GELATO_API_KEY. "
+                    "Check your key at https://app.gelato.network and update vault: "
+                    "~/.pi/agent/skills/agent-vault/vault.sh add GELATO_API_KEY <new-key>"
+                )
+
+            if resp.status_code == 400:
+                try:
+                    err_data = resp.json()
+                except Exception:
+                    err_data = {"message": resp.text[:200]}
+                error_msg = err_data.get("message", str(err_data))
+                raise GasResolverError(
+                    f"Gelato relay 400 bad request: {error_msg}. "
+                    f"Check chain_id={chain_id}, target={target}, and calldata format."
+                )
+
+            if resp.status_code == 429:
+                last_error = "Rate limited (HTTP 429)"
+                logger.warning(f"[Gelato] {last_error} — waiting before retry {attempt}/{retries}")
+                if attempt < retries:
+                    time.sleep(5)
+                continue
+
+            if resp.status_code not in (200, 201):
+                last_error = f"HTTP {resp.status_code}: {resp.text[:100]}"
+                logger.warning(f"[Gelato] Attempt {attempt}/{retries} — {last_error}")
+                if attempt < retries:
+                    time.sleep(2)
+                continue
+
+            # ── Parse response ───────────────────────────────────────────────
+            try:
+                data = resp.json()
+            except Exception as e:
+                raise GasResolverError(
+                    f"Gelato relay returned invalid JSON: {e}"
+                ) from e
+
+            task_id = data.get("taskId")
+            if not task_id:
+                raise GasResolverError(
+                    f"Gelato relay response missing 'taskId' field. "
+                    f"Full response: {data}"
+                )
+
+            logger.info(
+                f"[Gelato] ✅ Task submitted successfully | taskId={task_id}"
+            )
+            return task_id
+
+        # All retries exhausted
+        raise GasResolverError(
+            f"Gelato relay failed after {retries} attempts. Last error: {last_error}"
+        )
+
     # ── Private Helpers ───────────────────────────────────────────────────────
 
     def _try_relay_link(
@@ -853,15 +1088,30 @@ class GasResolver:
         current_balance: float,
         gas_needed: float,
         dry_run: bool,
+        target: Optional[str] = None,
+        calldata: Optional[str] = None,
+        gas_limit: Optional[int] = None,
     ) -> Optional[GasResolveResult]:
         """
         Attempt gasless execution via Gelato relay.
 
-        In Phase 1 MVP, this returns a structured result explaining the setup
-        required for Gelato, without fully executing it (requires Gelato API key
-        and 1Balance deposit — out of scope for Phase 1 dry-run).
+        Phase 2: Live implementation — calls Gelato's sponsored-call API using
+        GELATO_API_KEY from vault or env var, then verifies the returned taskId.
 
-        Returns GasResolveResult if Gelato is available, None otherwise.
+        In dry_run mode: returns a structured result without submitting to Gelato.
+        In live mode: submits the transaction to Gelato and returns taskId.
+
+        Args:
+            wallet:       Wallet address (for logging/tracking)
+            chain:        Target chain that needs gasless execution
+            current_balance: Current native gas balance
+            gas_needed:   Minimum gas required
+            dry_run:      If True, skip actual Gelato submission
+            target:       Contract to call gaslessly (required for live mode)
+            calldata:     ABI-encoded calldata (required for live mode)
+            gas_limit:    Optional gas limit override
+
+        Returns GasResolveResult if Gelato is available/configured, None otherwise.
         """
         chain_info = CHAINS[chain]
 
@@ -875,16 +1125,104 @@ class GasResolver:
             f"[Gelato] Relay available for {chain} at {gelato_info['relay_endpoint']}"
         )
 
-        # Check if Gelato API key is available
-        import os
-        gelato_key = os.environ.get("GELATO_API_KEY")
+        # ── Load API key (Phase 2 — vault or env) ────────────────────────────
+        gelato_key = self._load_gelato_api_key()
 
-        if not gelato_key and not dry_run:
-            logger.warning(
-                "[Gelato] GELATO_API_KEY not set — cannot execute gasless relay. "
-                "Set GELATO_API_KEY env var or deposit to Gelato 1Balance."
+        if not dry_run:
+            if not gelato_key:
+                logger.warning(
+                    "[Gelato] GELATO_API_KEY not configured — cannot execute live relay. "
+                    "Add to vault: ~/.pi/agent/skills/agent-vault/vault.sh add GELATO_API_KEY <key> "
+                    "or set GELATO_API_KEY env var. "
+                    "Get a key at: https://app.gelato.network"
+                )
+                return None
+
+            if not target or not calldata:
+                logger.warning(
+                    "[Gelato] Live mode requires 'target' and 'calldata' for sponsored-call relay. "
+                    "Provide the contract address and calldata to relay gaslessly."
+                )
+                return None
+
+        # ── Dry-run: return structured quote without submitting ───────────────
+        if dry_run:
+            has_key = gelato_key is not None
+            logger.info(
+                f"[Gelato] 🔵 DRY-RUN — API key {'found' if has_key else 'NOT configured'}. "
+                f"Would relay via {gelato_info['relay_endpoint']}. "
+                f"Set GELATO_API_KEY to enable live mode."
             )
+            return GasResolveResult(
+                strategy=GasStrategy.GELATO_RELAY,
+                chain=chain,
+                wallet_address=wallet,
+                current_balance=current_balance,
+                gas_needed=gas_needed,
+                has_enough=False,
+                dry_run=True,
+                status="quoted",
+                gelato_task_id=None,
+                meta={
+                    "chain_name": chain_info["name"],
+                    "gelato_relay_endpoint": gelato_info["relay_endpoint"],
+                    "gelato_api_key_configured": has_key,
+                    "gelato_target": target or "(no target provided in dry-run)",
+                    "description": (
+                        "Gelato 1Balance relay selected as fallback (dry-run). "
+                        f"Would execute transactions on {chain} without native gas. "
+                        f"API key {'configured ✅' if has_key else 'NOT configured ❌ — see vault'}. "
+                        "Docs: https://docs.gelato.network/developer-services/relay/gelato-1balance"
+                    ),
+                },
+            )
+
+        # ── Live mode: submit to Gelato sponsored-call API ───────────────────
+        logger.info(
+            f"[Gelato] 🚀 LIVE — submitting sponsored-call relay on {chain} | "
+            f"target={target[:16]}... | calldata_len={len(calldata)}"
+        )
+
+        try:
+            task_id = self._execute_gelato_relay(
+                chain=chain,
+                target=target,
+                calldata=calldata,
+                gelato_api_key=gelato_key,
+                gas_limit=gas_limit,
+            )
+        except GasResolverError as e:
+            logger.error(f"[Gelato] Live relay failed: {e}")
             return None
+
+        # ── Verify taskId is valid (non-empty, hex-like string) ──────────────
+        if not task_id or len(task_id) < 8:
+            logger.error(f"[Gelato] Invalid taskId returned: {repr(task_id)}")
+            return None
+
+        # ── Brief wait + initial status check ────────────────────────────────
+        logger.info(f"[Gelato] Waiting 3s before checking task status...")
+        time.sleep(3)
+
+        task_status = self.check_gelato_task_status(task_id)
+        task_state = task_status.get("taskState", "unknown")
+        tx_hash = task_status.get("transactionHash")
+
+        logger.info(
+            f"[Gelato] ✅ Task {task_id[:16]}... | state={task_state} | "
+            f"txHash={tx_hash or 'pending'}"
+        )
+
+        # Map Gelato task states to our status
+        if task_state in ("ExecSuccess",):
+            status = "confirmed"
+        elif task_state in ("ExecPending", "CheckPending", "WaitingForConfirmation"):
+            status = "submitted"
+        elif task_state in ("ExecReverted", "Cancelled"):
+            logger.warning(f"[Gelato] Task {task_state} — relay may have failed")
+            status = "failed"
+        else:
+            status = "submitted"  # Optimistic default for unknown states
 
         return GasResolveResult(
             strategy=GasStrategy.GELATO_RELAY,
@@ -893,19 +1231,16 @@ class GasResolver:
             current_balance=current_balance,
             gas_needed=gas_needed,
             has_enough=False,
-            dry_run=dry_run,
-            status="quoted" if dry_run else "pending_setup",
-            gelato_task_id=None,  # Would be set after actual submission
+            dry_run=False,
+            status=status,
+            gelato_task_id=task_id,
             meta={
-                "chain_name": chain_info["name"],
+                "chain_name":          chain_info["name"],
                 "gelato_relay_endpoint": gelato_info["relay_endpoint"],
-                "gelato_setup_required": gelato_info["setup_required"],
-                "description": (
-                    "Gelato 1Balance relay selected as fallback. "
-                    f"This will execute transactions on {chain} without requiring "
-                    "native gas. Requires GELATO_API_KEY env var and a 1Balance deposit. "
-                    "See: https://docs.gelato.network/developer-services/relay/gelato-1balance"
-                ),
+                "gelato_task_id":       task_id,
+                "gelato_task_state":    task_state,
+                "gelato_tx_hash":       tx_hash or "",
+                "gelato_target":        target,
             },
         )
 
