@@ -1,0 +1,59 @@
+{
+  "name": "autoswap",
+  "version": "0.1.0",
+  "description": "Cross-chain swaps in one line — built for AI agents. Auto-routing, bridge, gas, slippage protection.",
+  "main": "src/index.js",
+  "types": "src/index.d.ts",
+  "bin": {
+    "autoswap": "bin/autoswap.js"
+  },
+  "scripts": {
+    "test": "node test/smoke.js",
+    "prepublishOnly": "node --check src/index.js && node --check bin/autoswap.js"
+  },
+  "keywords": [
+    "defi",
+    "swap",
+    "cross-chain",
+    "bridge",
+    "crypto",
+    "ethereum",
+    "polygon",
+    "base",
+    "arbitrum",
+    "ai-agent",
+    "mcp",
+    "autoswap",
+    "paraswap",
+    "uniswap"
+  ],
+  "author": {
+    "name": "fino-oss",
+    "email": "fino.oss@proton.me",
+    "url": "https://github.com/fino-oss"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/fino-oss/autoswap.git"
+  },
+  "homepage": "https://github.com/fino-oss/autoswap#readme",
+  "bugs": {
+    "url": "https://github.com/fino-oss/autoswap/issues"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {},
+  "devDependencies": {},
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "files": [
+    "src/",
+    "bin/",
+    "README.md",
+    "LICENSE"
+  ]
+}

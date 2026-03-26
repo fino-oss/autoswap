@@ -1,0 +1,30 @@
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+.env
+*.env
+
+# npm
+node_modules/
+npm/.npmrc
+*.tgz
+
+# secrets (never commit)
+.npmrc
+*.pem
+*.key
+
+# test outputs
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE
+.vscode/
+.idea/
+*.swp

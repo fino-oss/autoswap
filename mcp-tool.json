@@ -1,0 +1,232 @@
+{
+  "schema_version": "v1",
+  "name_for_human": "AutoSwap",
+  "name_for_model": "autoswap",
+  "description_for_human": "Execute cross-chain crypto swaps in one call. Handles routing, bridging, gas, and slippage automatically. Supports Base, Polygon, Arbitrum, Optimism.",
+  "description_for_model": "AutoSwap executes or simulates cross-chain token swaps. It automatically finds the best route across DEXes (Paraswap, Uniswap V3), bridges via Across Protocol, resolves native gas on the destination chain, and enforces slippage protection. Always use dry_run=true first to simulate. The wallet key is read from the ETH_PRIVATE_KEY environment variable unless wallet_key is provided.",
+  "contact_email": "fino.oss@proton.me",
+  "legal_info_url": "https://github.com/fino-oss/autoswap/blob/main/LICENSE",
+  "logo_url": "https://raw.githubusercontent.com/fino-oss/autoswap/main/assets/logo.png",
+  "tools": [
+    {
+      "name": "swap",
+      "description": "Execute or simulate a cross-chain token swap. Automatically routes via best DEX, bridges cross-chain, resolves native gas, and protects against sandwich attacks. Use dry_run=true to simulate first.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "from_token": {
+            "type": "string",
+            "description": "Input token symbol. Examples: ETH, USDC, WETH, MYST, POL, DAI. Case-insensitive.",
+            "examples": ["ETH", "USDC", "MYST", "POL"]
+          },
+          "from_chain": {
+            "type": "string",
+            "description": "Source blockchain. Supported: base, polygon, arbitrum, optimism, ethereum.",
+            "enum": ["base", "polygon", "arbitrum", "optimism", "ethereum"]
+          },
+          "to_token": {
+            "type": "string",
+            "description": "Output token symbol. Examples: MYST, USDC, ETH, POL. Case-insensitive.",
+            "examples": ["MYST", "USDC", "ETH", "POL"]
+          },
+          "to_chain": {
+            "type": "string",
+            "description": "Destination blockchain. Same as from_chain for same-chain swaps.",
+            "enum": ["base", "polygon", "arbitrum", "optimism", "ethereum"]
+          },
+          "amount": {
+            "type": "number",
+            "description": "Amount of from_token to swap, in human units (e.g. 0.003 means 0.003 ETH, not wei). Must be positive.",
+            "minimum": 0.000001
+          },
+          "slippage_max": {
+            "type": "number",
+            "description": "Maximum acceptable slippage as a percentage. Default is 2.0 (= 2%). Range: 0.1 to 50. Lower values are safer but may cause the swap to fail in volatile markets.",
+            "default": 2.0,
+            "minimum": 0.1,
+            "maximum": 50.0
+          },
+          "wallet_key": {
+            "type": "string",
+            "description": "Optional. Hex private key (0x + 64 chars). If omitted, AutoSwap reads ETH_PRIVATE_KEY from environment or the agent vault. Never log or expose this value.",
+            "pattern": "^0x[0-9a-fA-F]{64}$"
+          },
+          "dry_run": {
+            "type": "boolean",
+            "description": "If true, simulate the swap (build all transaction data) without submitting to the blockchain. Recommended for safety — always dry_run first. Default: false.",
+            "default": false
+          }
+        },
+        "required": ["from_token", "from_chain", "to_token", "to_chain", "amount"]
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "description": "Whether the swap succeeded (or, in dry-run, whether simulation succeeded)"
+          },
+          "dry_run": {
+            "type": "boolean"
+          },
+          "route_taken": {
+            "type": "string",
+            "description": "Human-readable route description. E.g. 'ETH→USDC (base) | bridge USDC base→polygon | USDC→MYST (polygon)'"
+          },
+          "route_type": {
+            "type": "string",
+            "enum": ["same_chain", "direct_bridge", "swap_bridge_swap"]
+          },
+          "from_token": { "type": "string" },
+          "from_chain": { "type": "string" },
+          "to_token": { "type": "string" },
+          "to_chain": { "type": "string" },
+          "amount_in": {
+            "type": "number",
+            "description": "Amount of from_token sent"
+          },
+          "amount_out": {
+            "type": "number",
+            "description": "Estimated (dry-run) or actual (live) amount of to_token received"
+          },
+          "tx_hashes": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Transaction hashes (empty in dry-run)"
+          },
+          "steps": {
+            "type": "array",
+            "description": "Step-by-step breakdown of the swap route",
+            "items": {
+              "type": "object",
+              "properties": {
+                "step": { "type": "integer" },
+                "type": { "type": "string", "enum": ["swap", "bridge", "gas_resolve"] },
+                "from_token": { "type": "string" },
+                "to_token": { "type": "string" },
+                "chain": { "type": "string" },
+                "to_chain": { "type": ["string", "null"] },
+                "amount_in": { "type": "number" },
+                "amount_out": { "type": "number" },
+                "tx_hash": { "type": ["string", "null"] },
+                "status": { "type": "string", "enum": ["planned", "submitted", "confirmed", "failed"] }
+              }
+            }
+          },
+          "fees": {
+            "type": "object",
+            "description": "Fee breakdown: {description: amount}. Keys: bridge_fee, gas_step1, gas_step2, gas_resolve",
+            "additionalProperties": { "type": "number" }
+          },
+          "error": {
+            "type": ["string", "null"],
+            "description": "Error message if success=false"
+          }
+        }
+      },
+      "execution": {
+        "type": "subprocess",
+        "command": "python3",
+        "args": ["-m", "autoswap.mcp_handler"],
+        "cwd": "{package_dir}",
+        "env": {
+          "PYTHONPATH": "{package_dir}"
+        },
+        "timeout_seconds": 60
+      },
+      "examples": [
+        {
+          "title": "Dry-run cross-chain swap: ETH (Base) → MYST (Polygon)",
+          "input": {
+            "from_token": "ETH",
+            "from_chain": "base",
+            "to_token": "MYST",
+            "to_chain": "polygon",
+            "amount": 0.003,
+            "slippage_max": 2.0,
+            "dry_run": true
+          }
+        },
+        {
+          "title": "Same-chain swap: ETH → USDC on Base",
+          "input": {
+            "from_token": "ETH",
+            "from_chain": "base",
+            "to_token": "USDC",
+            "to_chain": "base",
+            "amount": 0.001,
+            "slippage_max": 1.0,
+            "dry_run": true
+          }
+        },
+        {
+          "title": "Bridge USDC: Base → Polygon",
+          "input": {
+            "from_token": "USDC",
+            "from_chain": "base",
+            "to_token": "USDC",
+            "to_chain": "polygon",
+            "amount": 10.0,
+            "slippage_max": 0.5,
+            "dry_run": true
+          }
+        }
+      ]
+    },
+    {
+      "name": "swap_quote",
+      "description": "Get a price quote for a swap without executing it. Returns expected output amount, route, and fee breakdown. Faster than swap() with dry_run=true as it skips transaction building.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "from_token": {
+            "type": "string",
+            "description": "Input token symbol"
+          },
+          "from_chain": {
+            "type": "string",
+            "enum": ["base", "polygon", "arbitrum", "optimism", "ethereum"]
+          },
+          "to_token": {
+            "type": "string",
+            "description": "Output token symbol"
+          },
+          "to_chain": {
+            "type": "string",
+            "enum": ["base", "polygon", "arbitrum", "optimism", "ethereum"]
+          },
+          "amount": {
+            "type": "number",
+            "minimum": 0.000001
+          },
+          "slippage_max": {
+            "type": "number",
+            "default": 2.0
+          }
+        },
+        "required": ["from_token", "from_chain", "to_token", "to_chain", "amount"]
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "expected_output": { "type": "number" },
+          "min_output": { "type": "number" },
+          "route": { "type": "string" },
+          "dex": { "type": "string" },
+          "price_impact_pct": { "type": "number" },
+          "bridge_fee": { "type": "number" },
+          "estimated_time_seconds": { "type": "integer" }
+        }
+      },
+      "execution": {
+        "type": "subprocess",
+        "command": "python3",
+        "args": ["-m", "autoswap.mcp_handler", "--quote-only"],
+        "cwd": "{package_dir}",
+        "timeout_seconds": 15
+      }
+    }
+  ],
+  "mcp_version": "2024-11-05",
+  "tags": ["defi", "crypto", "swap", "bridge", "cross-chain", "ethereum", "polygon", "base", "agent-tool"]
+}
