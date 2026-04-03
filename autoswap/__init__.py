@@ -28,19 +28,11 @@ Usage:
     result = swap("USDC", "base", "USDC", "polygon", 10.0)
 """
 
-import os
-import sys
-
-# Allow the src/ directory to be imported
-_pkg_dir = os.path.dirname(os.path.abspath(__file__))
-_src_dir = os.path.join(_pkg_dir, "..", "src")
-if _src_dir not in sys.path:
-    sys.path.insert(0, os.path.abspath(_src_dir))
-
-from swap import swap, SwapResult, StepResult, SwapError  # noqa: F401
+from .swap import swap, SwapResult, StepResult, SwapError  # noqa: F401
+from .safety import SafetyError  # noqa: F401
 
 __version__ = "0.1.0"
 __author__ = "fino-oss"
 __license__ = "MIT"
 
-__all__ = ["swap", "SwapResult", "StepResult", "SwapError", "__version__"]
+__all__ = ["swap", "SwapResult", "StepResult", "SwapError", "SafetyError", "__version__"]

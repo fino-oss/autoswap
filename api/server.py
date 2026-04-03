@@ -83,19 +83,18 @@ def _load_api_keys():
     if not _api_keys and not ADMIN_SECRET:
         dev_key = "dev-" + secrets.token_hex(16)
         _api_keys.add(dev_key)
-        log.warning(f"[DEV MODE] No API keys found. Auto-generated key: {dev_key}")
+        log.warning(f"[DEV MODE] No API keys found. Auto-generated key: {dev_key[:8]}... (set API_KEYS env to disable this)")
 
 _load_api_keys()
 
 # ─── Supported chains/tokens (from router) ──────────────────────────────────
-SUPPORTED_CHAINS = ["ethereum", "base", "polygon", "arbitrum", "optimism", "avalanche"]
+# Chains supported by the core SDK (must match gas.py CHAINS dict)
+SUPPORTED_CHAINS = ["base", "polygon", "arbitrum", "optimism"]
 SUPPORTED_TOKENS = {
-    "ethereum": ["ETH", "USDC", "USDT", "WETH", "DAI", "WBTC"],
-    "base":     ["ETH", "USDC", "WETH", "DAI"],
-    "polygon":  ["MATIC", "USDC", "USDT", "WETH", "DAI", "WBTC", "MYST"],
-    "arbitrum": ["ETH", "USDC", "USDT", "WETH", "DAI", "ARB"],
-    "optimism": ["ETH", "USDC", "USDT", "WETH", "DAI", "OP"],
-    "avalanche":["AVAX", "USDC", "USDT", "WETH", "DAI"],
+    "base":     ["ETH", "WETH", "USDC", "DAI"],
+    "polygon":  ["POL", "MATIC", "USDC", "USDT", "WETH", "DAI", "WBTC", "MYST"],
+    "arbitrum": ["ETH", "WETH", "USDC", "USDT", "DAI", "ARB"],
+    "optimism": ["ETH", "WETH", "USDC", "USDT", "DAI", "OP"],
 }
 
 # ─── Pydantic models ─────────────────────────────────────────────────────────
@@ -116,6 +115,14 @@ class SwapRequest(BaseModel):
             raise ValueError(f"Chain '{v}' not supported. Use: {SUPPORTED_CHAINS}")
         return v.lower()
 
+    @field_validator("from_token", "to_token")
+    @classmethod
+    def token_must_be_alphanumeric(cls, v):
+        import re
+        if not re.match(r'^[A-Za-z0-9_\-\.]{1,20}$', v):
+            raise ValueError(f"Token symbol '{v}' is invalid. Use standard symbols like ETH, USDC, MYST.")
+        return v.upper()
+
     @field_validator("wallet_key")
     @classmethod
     def key_format(cls, v):
@@ -134,6 +141,21 @@ class QuoteRequest(BaseModel):
     to_chain:     str   = Field(..., example="polygon")
     amount:       float = Field(..., gt=0)
     slippage_max: float = Field(2.0, ge=0.1, le=50.0)
+
+    @field_validator("from_chain", "to_chain")
+    @classmethod
+    def chain_must_be_supported(cls, v):
+        if v.lower() not in SUPPORTED_CHAINS:
+            raise ValueError(f"Chain '{v}' not supported. Use: {SUPPORTED_CHAINS}")
+        return v.lower()
+
+    @field_validator("from_token", "to_token")
+    @classmethod
+    def token_must_be_alphanumeric(cls, v):
+        import re
+        if not re.match(r'^[A-Za-z0-9_\-\.]{1,20}$', v):
+            raise ValueError(f"Token symbol '{v}' is invalid. Use standard symbols like ETH, USDC, MYST.")
+        return v.upper()
 
 
 class AdminKeyRequest(BaseModel):

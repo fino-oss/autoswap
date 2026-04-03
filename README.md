@@ -394,7 +394,7 @@ autoswap --from ETH --from-chain base --to MYST --to-chain polygon \
 
 ```python
 from autoswap import swap, SwapError
-from autoswap.src.safety import SafetyError
+from autoswap import SafetyError
 
 try:
     result = swap("ETH", "base", "MYST", "polygon", 0.003)
@@ -454,7 +454,7 @@ autoswap/
 
 - [x] Phase 1: Python SDK (routing + bridge + gas + safety)
 - [x] Phase 2: MCP tool + npm package + PyPI publish
-- [ ] Phase 3: Hosted API (`POST https://api.autoswap.dev/swap`)
+- [x] Phase 3: Hosted API (`POST https://api.autoswap.dev/swap`) ✅
 - [ ] Phase 4: Arbitrum + Optimism full support
 - [ ] Phase 5: Additional tokens (AAVE, LINK, UNI, ...)
 - [ ] Phase 6: Solana cross-chain support

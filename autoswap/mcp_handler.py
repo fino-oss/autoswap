@@ -99,11 +99,7 @@ def run_quote(params: dict) -> dict:
     """Get a fast price quote without executing the swap."""
     try:
         # Import directly from src for speed
-        _src_dir = os.path.join(os.path.dirname(__file__), "..", "src")
-        if _src_dir not in sys.path:
-            sys.path.insert(0, os.path.abspath(_src_dir))
-
-        from router import Router, RouterError
+        from autoswap.router import Router, RouterError
 
         router = Router()
         from_chain = params["from_chain"].lower()
